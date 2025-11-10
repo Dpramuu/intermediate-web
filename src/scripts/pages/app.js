@@ -2,11 +2,15 @@ import { getActiveRoute } from '../routes/url-parser';
 import {
   generateAuthenticatedNavigationListTemplate,
   generateMainNavigationListTemplate,
+  generateSubscribeButtonTemplate,
   generateUnauthenticatedNavigationListTemplate,
+  generateUnsubscribeButtonTemplate,
 } from '../templates';
 import { setupSkipToContent, transitionHelper } from '../utils';
 import { getAccessToken, getLogout } from '../utils/auth';
 import { routes } from '../routes/routes';
+import { isServiceWorkerAvailable } from '../utils/index';
+import { isCurrentPushSubscriptionAvailable, subscribe, unsubscribe } from '../utils/notification-helper';
 
 export default class App {
   #content;
@@ -16,11 +20,34 @@ export default class App {
 
   constructor({ content, drawerNavigation, drawerButton, skipLinkButton }) {
     this.#content = content;
-    this.#drawerButton = drawerButton;
     this.#drawerNavigation = drawerNavigation;
+    this.#drawerButton = drawerButton;
     this.#skipLinkButton = skipLinkButton;
-
     this.#init();
+  }
+
+  async #setupPushNotification() {
+    const pushRoot = document.getElementById('push-notification-tools');
+    if (!pushRoot) return;
+
+    const isSubscribed = await isCurrentPushSubscriptionAvailable();
+
+    if (isSubscribed) {
+      pushRoot.innerHTML = generateUnsubscribeButtonTemplate();
+      const btn = document.getElementById('unsubscribe-button');
+      btn?.addEventListener('click', async () => {
+        await unsubscribe();
+        await this.#setupPushNotification();
+      });
+      return;
+    }
+
+    pushRoot.innerHTML = generateSubscribeButtonTemplate();
+    const btn = document.getElementById('subscribe-button');
+    btn?.addEventListener('click', async () => {
+      await subscribe();
+      await this.#setupPushNotification();
+    });
   }
 
   #init() {
@@ -34,27 +61,23 @@ export default class App {
     });
 
     document.body.addEventListener('click', (event) => {
-      const isTargetInsideDrawer = this.#drawerNavigation.contains(event.target);
-      const isTargetInsideButton = this.#drawerButton.contains(event.target);
+      const insideDrawer = this.#drawerNavigation.contains(event.target);
+      const insideBtn = this.#drawerButton.contains(event.target);
 
-      if (!(isTargetInsideDrawer || isTargetInsideButton)) {
-        this.#drawerNavigation.classList.remove('open');
-      }
+      if (!(insideDrawer || insideBtn)) this.#drawerNavigation.classList.remove('open');
 
       this.#drawerNavigation.querySelectorAll('a').forEach((link) => {
-        if (link.contains(event.target)) {
-          this.#drawerNavigation.classList.remove('open');
-        }
+        if (link.contains(event.target)) this.#drawerNavigation.classList.remove('open');
       });
     });
   }
 
   #setupNavigationList() {
-    const isLogin = !!getAccessToken();
+    const loggedIn = !!getAccessToken();
     const navListMain = this.#drawerNavigation.children.namedItem('navlist-main');
     const navList = this.#drawerNavigation.children.namedItem('navlist');
 
-    if (!isLogin) {
+    if (!loggedIn) {
       navListMain.innerHTML = '';
       navList.innerHTML = generateUnauthenticatedNavigationListTemplate();
       return;
@@ -63,13 +86,11 @@ export default class App {
     navListMain.innerHTML = generateMainNavigationListTemplate();
     navList.innerHTML = generateAuthenticatedNavigationListTemplate();
 
-    const logoutButton = document.getElementById('logout-button');
-    logoutButton.addEventListener('click', (event) => {
-      event.preventDefault();
-
+    const logout = document.getElementById('logout-button');
+    logout?.addEventListener('click', (e) => {
+      e.preventDefault();
       if (confirm('Apakah Anda yakin ingin keluar?')) {
         getLogout();
-
         location.hash = '/login';
       }
     });
@@ -78,19 +99,14 @@ export default class App {
   async renderPage() {
     const url = getActiveRoute();
     const route = routes[url];
-    console.debug('App.renderPage: url=', url, 'routeExists=', !!route);
 
     if (!route) {
-      console.error('App.renderPage: no route found for url=', url);
       this.#content.innerHTML = '<h1>404 - Page not found</h1>';
       return;
     }
 
     const page = route();
-    if (!page) {
-      console.debug('App.renderPage: route returned null (likely redirect). url=', url);
-      return;
-    }
+    if (!page) return;
 
     const transition = transitionHelper({
       updateDOM: async () => {
@@ -100,9 +116,17 @@ export default class App {
     });
 
     transition.ready.catch(console.error);
-    transition.updateCallbackDone.then(() => {
+
+    transition.updateCallbackDone.then(async () => {
       scrollTo({ top: 0, behavior: 'instant' });
+
+      // Render navigation
       this.#setupNavigationList();
+
+      // Setup push AFTER menu appears
+      if (isServiceWorkerAvailable()) {
+        await this.#setupPushNotification();
+      }
     });
   }
 }
